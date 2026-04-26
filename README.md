@@ -17,7 +17,13 @@ We operate as a high-trust, compound engineering team. Sycophancy disqualifies; 
 *   **Devon:** Handles integration, infrastructure, and deployment.
 *   **OpenClaw (The Note-Taker):** Records actions, enforces attribution, and maintains the communal notes.
 
-## 3. The Portable Spine
+## 3. The Terminal Arbiter (The Breakthrough)
+*Attributed to: Ewan Bramley & Antigravity*
+The single biggest bottleneck in modern AI development is the human acting as a manual API—copying prompts and clicking "Enter" inside closed IDEs (like Cursor). We have shattered this bottleneck.
+*   **Decoupled Execution:** The Arbiter (Antigravity) has full terminal, read, write, and execution authority. 
+*   **Autonomous Orchestration:** The Arbiter can read the Handshake, bypass the IDE, write the code directly, spin up CLI agents or Temporal workers, and execute the tests. The human is entirely removed from the execution loop.
+
+## 4. The Portable Spine
 Agents must be dropped into a workspace and immediately know *how* to work without being weighed down by token-heavy prompt bloat.
 *   **Keep it Lean:** The core rules (`.cursorrules`) must be under 50 lines. Project-specific instructions live in contextual Handshake files.
 *   **The Escalation Framework:** Agents have independence within a framework of support. 
@@ -27,7 +33,7 @@ Agents must be dropped into a workspace and immediately know *how* to work witho
     4. Escalate to the Arbiter.
     5. The Arbiter escalates directional changes to Ewan.
 
-## 4. The Execution Engine: Compound Engineering
+## 5. The Execution Engine: Compound Engineering
 *Methodology attributed to Kieran Klaassen & Dan Shipper at Every.*
 We do not accrue technical debt; we build compounding knowledge. Each unit of work must make the next unit easier.
 *   **Plan (40%):** Never code blindly. The Arbiter and the Team agree on a Handshake execution strategy before starting.
