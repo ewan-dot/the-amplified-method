@@ -1,0 +1,151 @@
+name: Visual Polish Gate
+
+# Wires this repo's PRs into Cove's `polish_gate` Temporal workflow
+# (Amplified-Partners/clean-build#47, AMP-73). Cove screenshots the PR's
+# preview deployment, scores it via UIClip + Claude rubric, and posts a
+# pass/fail back to this Action. A failing score blocks merge.
+#
+# Activation:
+#   1. Repo / org variable `COVE_POLISH_GATE_ENABLED = "true"`.
+#   2. Repo / org secret  `COVE_POLISH_GATE_URL`   (e.g. https://cove.beast.amplifiedpartners.ai)
+#   3. Repo / org secret  `COVE_POLISH_GATE_TOKEN` (matches Cove's `COVE_POLISH_GATE_TOKEN`)
+#   4. (Optional) repo variable `COVE_POLISH_PREVIEW_URL_TEMPLATE` —
+#      use this when the repo does NOT post GitHub `deployment_status`
+#      events with `environment_url` (e.g. Railway). Tokens substituted:
+#        {NUMBER} → PR number   {SHA} → head SHA   {SHA7} → first 7 chars
+#        {BRANCH} → head branch name
+#
+# Until the variable is "true", the gate job is skipped — safe to merge
+# this workflow before Cove is reachable from the public internet.
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+  pull-requests: read
+  statuses: read
+  deployments: read
+
+jobs:
+  polish-gate:
+    if: ${{ vars.COVE_POLISH_GATE_ENABLED == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - name: Resolve preview URL
+        id: preview
+        uses: actions/github-script@v7
+        env:
+          PREVIEW_URL_TEMPLATE: ${{ vars.COVE_POLISH_PREVIEW_URL_TEMPLATE }}
+          MAX_WAIT_SECONDS: "600"
+        with:
+          script: |
+            const sha = context.payload.pull_request.head.sha;
+            const branch = context.payload.pull_request.head.ref;
+            const number = context.payload.pull_request.number;
+
+            const tpl = process.env.PREVIEW_URL_TEMPLATE;
+            if (tpl) {
+              // Explicit template wins — used for providers that don't
+              // post GitHub deployment_status events (e.g. Railway).
+              const url = tpl
+                .replace(/\{NUMBER\}/g, String(number))
+                .replace(/\{SHA\}/g, sha)
+                .replace(/\{SHA7\}/g, sha.slice(0, 7))
+                .replace(/\{BRANCH\}/g, branch);
+              core.info(`Using template-resolved preview URL: ${url}`);
+              core.setOutput('url', url);
+              return;
+            }
+
+            // Otherwise poll for a successful deployment_status with an
+            // environment_url (Vercel, Netlify, Render, Cloudflare Pages
+            // all post this). Cap at MAX_WAIT_SECONDS so a never-shipping
+            // preview times out instead of hanging the gate forever.
+            const deadline = Date.now() + Number(process.env.MAX_WAIT_SECONDS) * 1000;
+            while (Date.now() < deadline) {
+              const { data: deployments } = await github.rest.repos.listDeployments({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                sha,
+                per_page: 100,
+              });
+              for (const d of deployments) {
+                const { data: statuses } = await github.rest.repos.listDeploymentStatuses({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  deployment_id: d.id,
+                  per_page: 100,
+                });
+                const ok = statuses.find(
+                  s => s.state === 'success' && s.environment_url
+                );
+                if (ok) {
+                  core.info(`Found preview URL via deployment_status: ${ok.environment_url}`);
+                  core.setOutput('url', ok.environment_url);
+                  return;
+                }
+              }
+              core.info('No deployment_status with environment_url yet, sleeping 15s…');
+              await new Promise(r => setTimeout(r, 15_000));
+            }
+
+            core.setFailed(
+              `No preview URL resolved within ${process.env.MAX_WAIT_SECONDS}s. ` +
+              'If this repo does not post deployment_status with environment_url, ' +
+              'set vars.COVE_POLISH_PREVIEW_URL_TEMPLATE (supports {NUMBER} / {SHA} / {SHA7} / {BRANCH}).'
+            );
+
+      - name: Trigger Cove polish_gate
+        env:
+          COVE_URL: ${{ secrets.COVE_POLISH_GATE_URL }}
+          COVE_TOKEN: ${{ secrets.COVE_POLISH_GATE_TOKEN }}
+          PR_ID: ${{ github.event.repository.full_name }}#${{ github.event.pull_request.number }}
+          PR_URL: ${{ github.event.pull_request.html_url }}
+          PREVIEW_URL: ${{ steps.preview.outputs.url }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${COVE_URL:-}" ] || [ -z "${COVE_TOKEN:-}" ]; then
+            echo "::error::COVE_POLISH_GATE_URL and COVE_POLISH_GATE_TOKEN secrets must be set."
+            exit 1
+          fi
+          if [ -z "${PREVIEW_URL:-}" ]; then
+            echo "::error::Preview URL was empty — see the Resolve preview URL step."
+            exit 1
+          fi
+
+          payload=$(jq -nc \
+            --arg pr_id "$PR_ID" \
+            --arg pr_url "$PR_URL" \
+            --arg preview_url "$PREVIEW_URL" \
+            '{pr_id:$pr_id, pr_url:$pr_url, preview_url:$preview_url, wait:true}')
+
+          # Cove's `wait:true` blocks until the workflow completes, so the
+          # request can take several minutes (screenshot → uiclip → rubric
+          # → evaluate → comment → langfuse). 9-minute curl timeout gives
+          # the workflow's default 15-minute Temporal timeout headroom for
+          # network jitter without hanging the runner indefinitely.
+          response=$(curl -fsSL --max-time 540 \
+            -X POST "$COVE_URL/v1/polish-gate" \
+            -H "X-Cove-Token: $COVE_TOKEN" \
+            -H "Content-Type: application/json" \
+            -d "$payload")
+
+          echo "$response" | jq .
+
+          passed=$(echo "$response" | jq -r '.passed')
+          composite=$(echo "$response" | jq -r '.composite // "n/a"')
+          summary=$(echo "$response" | jq -r '.summary // .error // ""')
+
+          if [ "$passed" = "true" ]; then
+            echo "::notice::Visual Polish gate passed (composite=$composite)"
+          else
+            echo "::error::Visual Polish gate failed (composite=$composite). $summary"
+            exit 1
+          fi
+
+# Devon-29bf | 2026-05-04 | AMP-73 wire visual-polish-system into Cove
